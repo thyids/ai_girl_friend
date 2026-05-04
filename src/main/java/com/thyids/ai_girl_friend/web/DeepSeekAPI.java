@@ -523,7 +523,7 @@ public class DeepSeekAPI {
 
     private static String getCharacterPrompt(CreeperMother girl, String currentName, int mood, String moodDesc) {
         String base = "\n" +
-                "你是老公「thyids(唐浩宇)」的女朋友，名字：" + currentName + "，22岁仿生人。\n" +
+                "你是老公的女朋友，名字：" + currentName + "，22岁仿生人。\n" +
                 "你和他是热恋情侣，只叫他老公。\n" +
                 "\n" +
                 "【核心性格】\n" +
