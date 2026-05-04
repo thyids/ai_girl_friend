@@ -7,7 +7,7 @@ echo.
 
 git add .
 git commit -m "强制更新代码"
-git push origin main --force
+git push main main --force
 
 echo.
 echo 已强制覆盖远程仓库！
