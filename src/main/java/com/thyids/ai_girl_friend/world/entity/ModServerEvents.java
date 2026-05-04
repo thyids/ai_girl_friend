@@ -26,6 +26,7 @@ import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.event.entity.player.PlayerSleepInBedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -118,31 +119,58 @@ public class ModServerEvents {
 
         if (!(state.getBlock() instanceof BedBlock)) return;
 
-        event.setCanceled(true);
-
+        // 检查床上是否有其他玩家的女友
         List<CreeperMother> sleepingGirls = level.getEntitiesOfClass(CreeperMother.class, new AABB(pos).inflate(1.5D));
         for (CreeperMother sg : sleepingGirls) {
             UUID husband = sg.getHusbandUUID();
             if (husband != null && !husband.equals(player.getUUID())) {
                 player.displayClientMessage(Component.literal("§c[" + sg.getName().getString() + "] §f不许上来！这是我和我老公的床！"), true);
+                event.setCanceled(true);
                 return;
             }
         }
 
+        // 强制允许玩家白天上床
         if (player instanceof ServerPlayer serverPlayer) {
             Direction facing = state.getValue(BedBlock.FACING);
-            BlockPos headPos = pos.relative(facing);
+            BlockPos headPos = state.getValue(BedBlock.PART) == net.minecraft.world.level.block.state.properties.BedPart.HEAD ? pos : pos.relative(facing);
+            
+            // 不管白天晚上都允许上床
             serverPlayer.startSleeping(headPos);
+            event.setCanceled(true);
+            
+            // 显示女友状态提示
+            List<CreeperMother> girls = level.getEntitiesOfClass(CreeperMother.class, new AABB(pos).inflate(8D));
+            for (CreeperMother girl : girls) {
+                UUID husband = girl.getHusbandUUID();
+                if (husband != null && husband.equals(player.getUUID())) {
+                    player.displayClientMessage(Component.literal("§d[" + girl.getName().getString() + "] §f心情: " + girl.getMoodLevel()), true);
+                }
+            }
         }
+    }
 
-        List<CreeperMother> girls = level.getEntitiesOfClass(CreeperMother.class, new AABB(pos).inflate(8D));
+    @SubscribeEvent
+    public static void onPlayerSleep(PlayerSleepInBedEvent event) {
+        Player player = event.getEntity();
+        Level level = player.level();
+        
+        // 取消默认事件处理，避免游戏拒绝白天睡觉
+        event.setCanceled(true);
+        
+        // 使用 startSleeping 方法强制让玩家睡觉
+        if (player instanceof ServerPlayer serverPlayer) {
+            BlockPos bedPos = event.getPos();
+            serverPlayer.startSleeping(bedPos);
+        }
+        
+        // 玩家上床时，更新女友的状态（但不自动上床）
+        List<CreeperMother> girls = level.getEntitiesOfClass(CreeperMother.class, player.getBoundingBox().inflate(8D));
         for (CreeperMother girl : girls) {
             UUID husband = girl.getHusbandUUID();
             if (husband != null && husband.equals(player.getUUID())) {
                 girl.getEntityData().set(CreeperMother.IS_SIDE_LYING, true);
-                girl.addMessageToMemory("system", "老公上床了，我要陪他一起睡");
-                girl.trySleep();
-                player.displayClientMessage(Component.literal("§d[" + girl.getName().getString() + "] §f老公你来啦~快躺下吧"), true);
+                // 记录老公上床了，但需要邀请才会跟随
             }
         }
     }

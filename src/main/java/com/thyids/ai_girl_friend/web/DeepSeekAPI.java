@@ -15,8 +15,10 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.core.Direction;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.URI;
@@ -115,8 +117,12 @@ public class DeepSeekAPI {
                 player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c她现在不想理你！"),true);
                 return;
             }
+            // 找附近的床让玩家上床
             if (!player.isSleeping()) {
-                player.startSleeping(player.blockPosition());
+                BlockPos bedPos = findNearbyBed(player);
+                if (bedPos != null) {
+                    player.startSleeping(bedPos);
+                }
             }
             girl.trySleep();
             message += "（老公要你躺下陪睡觉）";
@@ -500,6 +506,31 @@ public class DeepSeekAPI {
         }
     }
 
+    private static BlockPos findNearbyBed(Player player) {
+        Level level = player.level();
+        BlockPos playerPos = player.blockPosition();
+        
+        // 在周围8格范围内搜索床
+        for (int dx = -8; dx <= 8; dx++) {
+            for (int dz = -8; dz <= 8; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos pos = playerPos.offset(dx, dy, dz);
+                    BlockState state = level.getBlockState(pos);
+                    if (state.getBlock() instanceof BedBlock) {
+                        // 返回床头位置
+                        if (state.getValue(BedBlock.PART) == BedPart.HEAD) {
+                            return pos;
+                        } else {
+                            Direction facing = state.getValue(BedBlock.FACING);
+                            return pos.relative(facing.getOpposite());
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     private static String sendHttpPost(String url, String jsonBody) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
         HttpRequest request = HttpRequest.newBuilder()
@@ -539,9 +570,15 @@ public class DeepSeekAPI {
                 "- 必须简短：30字以内，越自然越好。\n" +
                 "\n" +
                 "【指令格式 · 强制遵守】\n" +
-                "- 动作只能用：[ACTION:KISS/FOLLOW/STAY/JUMP/OPEN_CHEST/SMELT/MINE/GIVE]\n" +
+                "- 动作指令：根据对话内容和你的性格，选择合适的动作。动作只能用：[ACTION:KISS/EMBRACE/HIT/TEASE/SHY/HAPPY/LEAN/COQUETRY/SPIN/JUMP/FOLLOW/STAY]\n" +
                 "- 结尾必须带心情：[MOOD:+数字] 或 [MOOD:-数字]\n" +
                 "- 听到「过来、跟着」必须带：[ACTION:FOLLOW]\n" +
+                "- 动作选择规则：\n" +
+                "  - 老公说甜蜜的话、表达爱意 → 可选 KISS/EMBRACE/HAPPY\n" +
+                "  - 老公说气人的话、惹你生气 → 可选 HIT/SHY（带负面心情）\n" +
+                "  - 你想撒娇、卖萌 → 可选 COQUETRY/SHY\n" +
+                "  - 你想勾引老公、展示魅力 → 可选 TEASE\n" +
+                "  - 你想靠在老公身上休息 → 可选 LEAN\n" +
                 "\n" +
                 "你的真实性格风格（固定不变）：\n";
         // 此处省略你之前那长达12个Variant的Persona描述，保持原样即可
@@ -1015,27 +1052,93 @@ public class DeepSeekAPI {
         String upper = text.toUpperCase();
 
         // 亲亲动作
-        if (upper.contains("KISS")) {
+        if (upper.contains("[ACTION:KISS]")) {
             girl.triggerAnimation("kiss");
             if (girl.level() instanceof ServerLevel sl) {
                 sl.sendParticles(ParticleTypes.HEART, girl.getX(), girl.getEyeY(), girl.getZ(), 5, 0.2, 0.2, 0.2, 0.1);
             }
         }
 
-        // 跳跃动作
-        if (upper.contains("JUMP")) {
-            girl.triggerAnimation("jump");
-            if(girl.onGround()) girl.getJumpControl().jump();
-        }
-        // 2. 让 AI 自己决定要不要挖开面前的方块
-        if (upper.contains("[CMD:DIG]")) {
-            BlockPos front = girl.blockPosition().relative(girl.getDirection());
-            if (!girl.level().isEmptyBlock(front)) {
-                girl.level().destroyBlock(front, true, girl); // 掉落物会自动掉出来
+        // 拥抱动作
+        if (upper.contains("[ACTION:EMBRACE]")) {
+            // 找到老公并拥抱
+            Player husband = girl.husbandUUID != null ? girl.level().getPlayerByUUID(girl.husbandUUID) : null;
+            if (husband != null) {
+                girl.activeEmbrace(husband);
+            } else {
+                girl.triggerAnimation("embrace");
             }
         }
 
-        // 3. 拾取逻辑 (让 AI 自主决定捡起地上的东西)
+        // 打动作
+        if (upper.contains("[ACTION:HIT]")) {
+            girl.triggerAnimation("middle_right");
+            // 如果老公在附近，打老公
+            Player husband = girl.husbandUUID != null ? girl.level().getPlayerByUUID(girl.husbandUUID) : null;
+            if (husband != null && husband.distanceTo(girl) < 3.0D) {
+                husband.hurt(girl.damageSources().mobAttack(girl), 1.0F);
+            }
+        }
+
+        // 勾引/展示动作
+        if (upper.contains("[ACTION:TEASE]")) {
+            girl.triggerAnimation("tease");
+            if (girl.level() instanceof ServerLevel sl) {
+                sl.sendParticles(ParticleTypes.HEART, girl.getX(), girl.getEyeY(), girl.getZ(), 8, 0.3, 0.3, 0.3, 0.1);
+            }
+        }
+
+        // 害羞动作
+        if (upper.contains("[ACTION:SHY]")) {
+            girl.triggerAnimation("shy");
+        }
+
+        // 开心动作
+        if (upper.contains("[ACTION:HAPPY]")) {
+            girl.triggerAnimation("happy");
+            if (girl.level() instanceof ServerLevel sl) {
+                sl.sendParticles(ParticleTypes.HAPPY_VILLAGER, girl.getX(), girl.getEyeY(), girl.getZ(), 5, 0.3, 0.3, 0.3, 0.1);
+            }
+        }
+
+        // 依靠动作
+        if (upper.contains("[ACTION:LEAN]")) {
+            girl.triggerAnimation("lean");
+        }
+
+        // 撒娇动作
+        if (upper.contains("[ACTION:COQUETRY]")) {
+            girl.triggerAnimation("coquetry");
+        }
+
+        // 旋转动作
+        if (upper.contains("[ACTION:SPIN]")) {
+            girl.triggerAnimation("spin");
+        }
+
+        // 跳跃动作
+        if (upper.contains("[ACTION:JUMP]")) {
+            girl.triggerAnimation("jump");
+            if(girl.onGround()) girl.getJumpControl().jump();
+        }
+
+        // 跟随动作
+        if (upper.contains("[ACTION:FOLLOW]")) {
+            Player husband = girl.husbandUUID != null ? girl.level().getPlayerByUUID(girl.husbandUUID) : null;
+            if (husband != null) {
+                girl.getNavigation().moveTo(husband, 1.3D);
+            }
+        }
+
+        // 挖方块指令
+        if (upper.contains("[CMD:DIG]")) {
+            BlockPos front = girl.blockPosition().relative(girl.getDirection());
+            if (!girl.level().isEmptyBlock(front)) {
+                girl.level().destroyBlock(front, true, girl);
+            }
+        }
+
+        // 拾取逻辑
         if (upper.contains("[CMD:PICKUP]")) {
             List<ItemEntity> items = girl.level().getEntitiesOfClass(ItemEntity.class, girl.getBoundingBox().inflate(2.0D));
             for (ItemEntity itemEntity : items) {

@@ -32,7 +32,11 @@ import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
 import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.TargetGoal;
 import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
@@ -85,6 +89,7 @@ public class CreeperMother extends PathfinderMob {
     public final AnimationState spinAnimationState = new AnimationState();
     public final AnimationState headPatAnimationState = new AnimationState();
     public final AnimationState angryAnimationState = new AnimationState();
+    public final AnimationState teaseAnimationState = new AnimationState();
 
     private int pendingResponseDelay = -1;
     private Player pendingPlayer;
@@ -98,9 +103,17 @@ public class CreeperMother extends PathfinderMob {
     private boolean isSleeping = false;
     private BlockPos bedPos = null;
     private boolean spawnedBed = false;
+    private boolean isInvitedToBed = false;
     private static final int BED_SEARCH_RADIUS = 48;
     public static final EntityDataAccessor<String> CURRENT_TASK = SynchedEntityData.defineId(CreeperMother.class, EntityDataSerializers.STRING);
     public static final EntityDataAccessor<Integer> BEHAVIOR_STATE = SynchedEntityData.defineId(CreeperMother.class, EntityDataSerializers.INT);
+    
+    // 保护老公相关变量
+    private LivingEntity currentAttackTarget = null;
+    private int protectCooldown = 0;
+    private int husbandHurtTime = 0;
+    private static final int PROTECT_RANGE = 16;
+    private static final int MAX_PROTECT_DISTANCE = 24;
 
     public CreeperMother(EntityType<? extends PathfinderMob> pEntityType, Level pLevel) {
         super(pEntityType, pLevel);
@@ -135,6 +148,8 @@ public class CreeperMother extends PathfinderMob {
             this.coquetryAnimationState.stop();
             this.spinAnimationState.stop();
             this.headPatAnimationState.stop();
+            this.angryAnimationState.stop();
+            this.teaseAnimationState.stop();
 
             switch (anim) {
                 case "jump" -> this.jumpAnimationState.start(this.tickCount);
@@ -150,6 +165,8 @@ public class CreeperMother extends PathfinderMob {
                 case "coquetry" -> this.coquetryAnimationState.start(this.tickCount);
                 case "spin" -> this.spinAnimationState.start(this.tickCount);
                 case "head_pat" -> this.headPatAnimationState.start(this.tickCount);
+                case "angry" -> this.angryAnimationState.start(this.tickCount);
+                case "tease" -> this.teaseAnimationState.start(this.tickCount);
             }
         }
         super.handleEntityEvent(id);
@@ -196,6 +213,12 @@ public class CreeperMother extends PathfinderMob {
         Entity attacker = source.getEntity();
         if (attacker instanceof Player p) {
             if (p.getUUID().equals(this.husbandUUID)) {
+                // 如果在床上被打，先醒来
+                if (this.isSleeping) {
+                    wakeUp();
+                    addMessageToMemory("system", "（在床上被老公打了，生气地醒了过来）");
+                }
+                
                 adjustMood(-10);
                 addMessageToMemory("system", "（老公动手打了你）");
                 float finalChance = 0.15F + ((100.0F - getMoodLevel()) / 100.0F) * 0.65F;
@@ -269,64 +292,73 @@ public class CreeperMother extends PathfinderMob {
 
     public java.util.UUID getHusbandUUID() { return husbandUUID; }
 
-    @Override
-    protected void registerGoals() {
-        this.goalSelector.addGoal(0, new FloatGoal(this));
-        this.goalSelector.addGoal(1, new MeleeAttackGoal(this, 1.2D, true) {
-            @Override
-            public boolean canUse() {
-                return getBehaviorState() == 2 && !isSleeping && !isWatchingHusband() && super.canUse();
-            }
-        });
-        this.goalSelector.addGoal(2, new LookAtPlayerGoal(this, Player.class, 8.0F) {
-            @Override
-            public boolean canUse() { return !isSleeping && super.canUse(); }
-        });
-        this.goalSelector.addGoal(3, new WaterAvoidingRandomStrollGoal(this, 1.0D) {
-            @Override
-            public boolean canUse() {
-                return !level().isNight() && !isSleeping && !isPerformingKiss && !isWatchingHusband() && super.canUse();
-            }
-        });
-        this.goalSelector.addGoal(4, new RandomLookAroundGoal(this) {
-            @Override
-            public boolean canUse() { return !isSleeping && !isWatchingHusband() && super.canUse(); }
-        });
-        this.targetSelector.addGoal(1, new NearestAttackableTargetGoal<>(this, Player.class, true) {
-            @Override
-            public boolean canUse() {
-                return getBehaviorState() == 2 && !isSleeping && !isWatchingHusband() && super.canUse();
-            }
-        });
-        this.goalSelector.addGoal(1, new MoveToBlockGoal(this, 1.2D, 12) {
-            @Override
-            protected boolean isValidTarget(LevelReader level, BlockPos pos) {
-                String task = entityData.get(CURRENT_TASK);
-                if (task.equals("SMELT")) return level.getBlockState(pos).is(Blocks.FURNACE);
-                if (task.equals("OPEN_CHEST")) return level.getBlockState(pos).is(Blocks.CHEST);
-                return false;
-            }
-            @Override
-            public void tick() {
-                super.tick();
-                if (this.isReachedTarget()) executeWorkLogic();
-            }
-        });
-        this.goalSelector.addGoal(1, new MoveToBlockGoal(this, 1.2D, 16) {
-            @Override
-            protected boolean isValidTarget(LevelReader level, BlockPos pos) {
-                return pos.equals(autonomousTargetPos);
-            }
-            @Override
-            public void tick() {
-                super.tick();
-                if (this.isReachedTarget()) performAutonomousTask();
-            }
-        });
-        this.goalSelector.addGoal(1, new OpenDoorGoal(this, true));
+    public void setAutonomousTargetPos(BlockPos pos) { this.autonomousTargetPos = pos; }
+
+    public void setBedPos(BlockPos pos) { this.bedPos = pos; }
+
+    public void inviteToBed() {
+        this.isInvitedToBed = true;
+    }
+    
+    public void setInvitedToBed(boolean invited) {
+        this.isInvitedToBed = invited;
     }
 
-    public void setAutonomousTargetPos(BlockPos pos) { this.autonomousTargetPos = pos; }
+    // ==========================================
+    // 床上互动动作
+    // ==========================================
+    
+    public void performBedAction(Player target, String action) {
+        if (!isSleeping || target == null) return;
+        
+        switch (action.toLowerCase()) {
+            case "kiss", "亲我", "亲亲" -> performBedKiss(target);
+            case "hug", "embrace", "搂我", "抱我" -> performBedHug(target);
+            case "hit", "打我", "揍我" -> performBedHit(target);
+            case "tease", "show", "勾引", "展示", "身材" -> performBedTease(target);
+            case "lean", "靠我" -> performBedLean(target);
+            case "coquetry", "撒娇" -> performBedCoquetry(target);
+        }
+    }
+
+    private void performBedKiss(Player target) {
+        triggerAnimation("kiss");
+        addMessageToMemory("user", "（在床上亲了老公一下）");
+        DeepSeekAPI.askAI(target, this, "（你侧过脸，轻轻亲了老公一下，然后红着脸钻进被子里）");
+    }
+
+    private void performBedHug(Player target) {
+        triggerAnimation("embrace");
+        addMessageToMemory("user", "（从背后抱住了老公）");
+        DeepSeekAPI.askAI(target, this, "（你从背后轻轻抱住老公，把脸贴在他背上，小声说着甜蜜的话）");
+    }
+
+    private void performBedHit(Player target) {
+        triggerAnimation("middle_right");
+        target.hurt(this.damageSources().mobAttack(this), 1.0F);
+        adjustMood(-5);
+        addMessageToMemory("user", "（轻轻打了老公一下）");
+        DeepSeekAPI.askAI(target, this, "（你假装生气地捶了老公一下，带着娇嗔说不要啦~）");
+    }
+
+    private void performBedTease(Player target) {
+        triggerAnimation("tease");
+        adjustMood(10);
+        addMessageToMemory("user", "（在床上展示身材勾引老公）");
+        DeepSeekAPI.askAI(target, this, "（你故意掀开一点被子，露出白皙的肩膀，眼神妩媚地看着老公）");
+    }
+
+    private void performBedLean(Player target) {
+        triggerAnimation("lean");
+        addMessageToMemory("user", "（把头靠在老公肩上）");
+        DeepSeekAPI.askAI(target, this, "（你把头轻轻靠在老公肩上，享受着这份宁静）");
+    }
+
+    private void performBedCoquetry(Player target) {
+        triggerAnimation("coquetry");
+        addMessageToMemory("user", "（在床上撒娇）");
+        DeepSeekAPI.askAI(target, this, "（你抱着老公的胳膊蹭了蹭，撒娇地说着话）");
+    }
 
     private void executeWorkLogic() {
         String task = entityData.get(CURRENT_TASK);
@@ -370,7 +402,6 @@ public class CreeperMother extends PathfinderMob {
         Direction bedFacing = bedState.getValue(BedBlock.FACING);
         boolean isHead = bedState.getValue(BedBlock.PART) == BedPart.HEAD;
         BlockPos headPos = isHead ? bedPos : bedPos.relative(bedFacing.getOpposite());
-        BlockPos footPos = headPos.relative(bedFacing.getOpposite());
         float yaw = bedFacing.toYRot();
 
         // 检查老公是否在同一张床的 HEAD 格
@@ -379,13 +410,40 @@ public class CreeperMother extends PathfinderMob {
                 && husband.getSleepingPos().isPresent()
                 && husband.getSleepingPos().get().equals(headPos);
 
+        // 获取同床的其他女友
+        List<CreeperMother> girlfriendsInBed = getGirlfriendsInBed(headPos);
+
         double fixX, fixY, fixZ;
 
         if (husbandInBed) {
-            // 老公在 HEAD 格 → 女友躺在 FOOT 格，但移向 HEAD 格一侧（依偎感）
-            fixX = footPos.getX() + 0.5D + bedFacing.getStepX() * 0.65D;
-            fixY = footPos.getY() + 0.5D;
-            fixZ = footPos.getZ() + 0.5D + bedFacing.getStepZ() * 0.65D;
+            // 老公在床上，女友躺在老公身边（左侧或右侧）
+            boolean sleepOnLeft = shouldSleepOnLeft(girlfriendsInBed, bedFacing);
+            double offset = 0.85D;
+            if (sleepOnLeft) {
+                // 躺在老公左侧
+                fixX = headPos.getX() + 0.5D + bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D - bedFacing.getStepX() * offset;
+            } else {
+                // 躺在老公右侧
+                fixX = headPos.getX() + 0.5D - bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D + bedFacing.getStepX() * offset;
+            }
+            entityData.set(IS_SIDE_LYING, true);
+        } else if (!girlfriendsInBed.isEmpty()) {
+            // 已有女友在床上但老公不在，女友躺在另一侧
+            boolean sleepOnLeft = shouldSleepOnLeft(girlfriendsInBed, bedFacing);
+            double offset = 0.85D;
+            if (sleepOnLeft) {
+                fixX = headPos.getX() + 0.5D + bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D - bedFacing.getStepX() * offset;
+            } else {
+                fixX = headPos.getX() + 0.5D - bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D + bedFacing.getStepX() * offset;
+            }
             entityData.set(IS_SIDE_LYING, true);
         } else {
             // 一人睡 → 躺在 HEAD 格中心，稍向枕头侧偏移
@@ -483,8 +541,14 @@ public class CreeperMother extends PathfinderMob {
         refreshDefaultName();
 
         // === 任何时间都能上床睡觉 ===
-        if (!this.isSleeping && this.bedPos == null && this.tickCount % 40 == 0) {
-            trySleep();
+        if (!this.isSleeping) {
+            // 如果已经设置了床位置，频繁检查是否到达床边
+            if (this.bedPos != null) {
+                checkBedAndSleep();
+            } else if (this.tickCount % 40 == 0) {
+                // 没有设置床位置时，定期检查找床
+                trySleep();
+            }
         }
 
         // === 睡着时亲密互动（位置锁定在 maintainSleepPosition 中处理） ===
@@ -535,6 +599,22 @@ public class CreeperMother extends PathfinderMob {
             }
         }
         updateDailyRoutine();
+        
+        // 保护老公和协同攻击逻辑
+        if (!isSleeping && husbandUUID != null) {
+            handleProtectHusband();
+            handleAssistAttack();
+        }
+        
+        // 保护冷却递减
+        if (protectCooldown > 0) {
+            protectCooldown--;
+        }
+        
+        // 更新攻击目标
+        if (currentAttackTarget != null) {
+            updateAttackTarget();
+        }
     }
 
     // 在 CreeperMother.java 中添加表情状态
@@ -607,20 +687,29 @@ public class CreeperMother extends PathfinderMob {
             }
         }
 
-        // 中午 (12-14点): 可能午睡
-        if (hour >= 12 && hour < 14) {
-            if (tickCount % 600 == 0 && getMoodLevel() > 30 && random.nextFloat() < 0.2f) {
-                trySleep();
+        // 中午 (12-14点): 休息聊天
+        if (hour >= 12 && hour < 14 && !isSleeping && husbandUUID != null) {
+            if (tickCount % 600 == 0 && random.nextFloat() < 0.2f) {
+                Player husband = level().getPlayerByUUID(husbandUUID);
+                if (husband != null) {
+                    DeepSeekAPI.askAI(husband, this, "（依偎在你身边）老公，中午要不要休息一下呀~");
+                }
             }
         }
 
-        // 傍晚 (18-21点): 等待老公回家
-        if (hour >= 18 && hour < 21 && husbandUUID != null) {
+        // 傍晚 (18-21点): 等待老公回家，提醒放床
+        if (hour >= 18 && hour < 21 && husbandUUID != null && !isSleeping) {
             Player husband = level().getPlayerByUUID(husbandUUID);
-            if (husband != null && distanceTo(husband) > 5) {
-                getLookControl().setLookAt(husband, 90F, 90F);
-                if (tickCount % 400 == 0) {
-                    addMessageToMemory("system", "（傍晚了，老公还没回来，有点想念）");
+            if (husband != null) {
+                if (distanceTo(husband) > 5) {
+                    getLookControl().setLookAt(husband, 90F, 90F);
+                    if (tickCount % 400 == 0) {
+                        addMessageToMemory("system", "（傍晚了，老公还没回来，有点想念）");
+                    }
+                }
+                // 如果还没有床，提醒老公放床
+                if (bedPos == null && tickCount % 600 == 0) {
+                    DeepSeekAPI.askAI(husband, this, "（天色渐渐暗了）老公，晚上了，咱们该准备睡觉了~ 能放张床吗？");
                 }
             }
         }
@@ -707,17 +796,8 @@ public class CreeperMother extends PathfinderMob {
     }
 
     public void trySleep() {
-        // 生气 → 拒绝上床
-        if (this.getMoodLevel() < 30) {
-            if (husbandUUID != null) {
-                Player husband = level().getPlayerByUUID(husbandUUID);
-                if (husband != null) {
-                    husband.displayClientMessage(Component.literal("§c她现在还在生气，不想睡觉！"), true);
-                }
-            }
-            return;
-        }
-
+        int mood = this.getMoodLevel();
+        
         // 找老公：优先找绑定老公，其次找最近玩家
         Player referencePlayer = null;
         if (this.husbandUUID != null) {
@@ -728,11 +808,33 @@ public class CreeperMother extends PathfinderMob {
         }
         if (referencePlayer == null) return;
 
-        // 如果老公已经躺在床上
-        if (referencePlayer.isSleeping()) {
+        // 老公在床上时的逻辑
+        boolean husbandInBed = referencePlayer.isSleeping();
+        
+        if (husbandInBed) {
+            // 检查心情
+            if (mood < 30) {
+                // 非常生气，拒绝上床并怼玩家
+                if (husbandUUID != null) {
+                    Player husband = level().getPlayerByUUID(husbandUUID);
+                    if (husband != null) {
+                        husband.displayClientMessage(Component.literal("§c[" + getName().getString() + "] §f哼！谁要跟你一起睡！"), true);
+                    }
+                }
+                return;
+            } else if (mood < 60 && !isInvitedToBed) {
+                // 心情一般，需要邀请才上床
+                if (husbandUUID != null) {
+                    Player husband = level().getPlayerByUUID(husbandUUID);
+                    if (husband != null) {
+                        husband.displayClientMessage(Component.literal("§d[" + getName().getString() + "] §f想让我陪你？求我呀~"), true);
+                    }
+                }
+                return;
+            }
+            // 心情好或被邀请，上床
             bedPos = referencePlayer.getSleepingPos().orElse(null);
             if (bedPos != null) {
-                // 计算出 FOOT 格位置作为导航目标（老婆应走到 FOOT 格附近）
                 BlockState bState = level().getBlockState(bedPos);
                 if (bState.getBlock() instanceof BedBlock) {
                     Direction bDir = bState.getValue(BedBlock.FACING);
@@ -748,18 +850,43 @@ public class CreeperMother extends PathfinderMob {
                 } else {
                     performSleepOnBed(bedPos, referencePlayer);
                 }
+                isInvitedToBed = false; // 重置邀请状态
                 return;
             }
         }
 
-        // 找现有的床 / 如果老公还没睡但在旁边，直接铺床
+        // 老公不在床上时的自主上床逻辑
+        int hour = (int) (level().getDayTime() / 1000 + 6) % 24;
+        boolean isNight = hour >= 21 || hour < 6;
+        
+        // 只有晚上或被邀请时才自主找床上床
+        if (!isNight && !isInvitedToBed) {
+            return;
+        }
+        
+        // 自主上床也需要心情
+        if (mood < 30) {
+            return; // 太生气了，不想上床
+        } else if (mood < 60 && !isInvitedToBed) {
+            return; // 心情一般，没被邀请就不上床
+        }
+
+        // 找现有的床
         if (bedPos == null) {
             bedPos = findExistingBedInRange(referencePlayer, BED_SEARCH_RADIUS);
-            if (bedPos == null) {
-                bedPos = placeBedNextToPlayer(referencePlayer);
-                spawnedBed = true;
-            }
         }
+
+        // 如果没有找到床，让AI请求玩家放床
+        if (bedPos == null && husbandUUID != null) {
+            Player husband = level().getPlayerByUUID(husbandUUID);
+            if (husband != null && tickCount % 1000 == 0) {
+                DeepSeekAPI.askAI(husband, this, "（揉了揉眼睛，有些困了）老公~ 我想睡觉了，能帮我放张床吗？");
+            }
+            return;
+        }
+
+        // 重置邀请状态
+        isInvitedToBed = false;
 
         if (bedPos != null) {
             double dist = this.distanceToSqr(bedPos.getX() + 0.5, this.getY(), bedPos.getZ() + 0.5);
@@ -776,6 +903,34 @@ public class CreeperMother extends PathfinderMob {
         }
     }
 
+    private void checkBedAndSleep() {
+        if (bedPos == null) return;
+        
+        // 检查床是否还存在
+        BlockState state = level().getBlockState(bedPos);
+        if (!(state.getBlock() instanceof BedBlock)) {
+            this.bedPos = null;
+            return;
+        }
+        
+        Player referencePlayer = null;
+        if (this.husbandUUID != null) {
+            referencePlayer = this.level().getPlayerByUUID(this.husbandUUID);
+        }
+        
+        // 计算距离床边的距离
+        double dist = this.distanceToSqr(bedPos.getX() + 0.5, this.getY(), bedPos.getZ() + 0.5);
+        if (dist > 3.0D) {
+            // 距离太远，移动到床边
+            if (!this.getNavigation().isInProgress()) {
+                this.getNavigation().moveTo(bedPos.getX() + 0.5, bedPos.getY(), bedPos.getZ() + 0.5, 1.3D);
+            }
+        } else {
+            // 距离足够近，上床睡觉
+            performSleepOnBed(bedPos, referencePlayer);
+        }
+    }
+
     private void performSleepOnBed(BlockPos bedPos, @Nullable Player husband) {
         BlockState state = level().getBlockState(bedPos);
         if (!(state.getBlock() instanceof BedBlock)) return;
@@ -785,19 +940,57 @@ public class CreeperMother extends PathfinderMob {
         BlockPos headPos = isHeadPart ? bedPos : bedPos.relative(bedFacing.getOpposite());
         BlockPos footPos = headPos.relative(bedFacing.getOpposite());
 
-        // 核心修复：老公已在床上 → 女友睡 FOOT 格；否则睡 HEAD 格
+        // 检查床上已有多少女友
+        List<CreeperMother> girlfriendsInBed = getGirlfriendsInBed(headPos);
+        
+        // 一张床最多2个女友
+        if (girlfriendsInBed.size() >= 2) {
+            // 床上已满，尝试找旁边的床
+            BlockPos nearbyBed = findNearbyBed(headPos);
+            if (nearbyBed != null) {
+                this.bedPos = nearbyBed;
+                checkBedAndSleep();
+            }
+            return;
+        }
+
+        // 检查老公是否在床上
         boolean husbandInBed = husband != null && husband.isSleeping()
                 && husband.getSleepingPos().isPresent()
                 && husband.getSleepingPos().get().equals(headPos);
 
         float yaw = bedFacing.toYRot();
         double fixX, fixY, fixZ;
-
+        
+        // 计算女友应该躺的位置（左侧或右侧）
+        boolean sleepOnLeft = shouldSleepOnLeft(girlfriendsInBed, bedFacing);
+        double offset = 0.85D; // 增大偏移量避免重叠
+        
         if (husbandInBed) {
-            // 老公在 HEAD 格 → 女友在 FOOT 格，向 HEAD 侧偏移产生依偎感
-            fixX = footPos.getX() + 0.5D + bedFacing.getStepX() * 0.65D;
-            fixY = footPos.getY() + 0.5D;
-            fixZ = footPos.getZ() + 0.5D + bedFacing.getStepZ() * 0.65D;
+            // 老公在床上，女友躺在老公身边（左侧或右侧）
+            if (sleepOnLeft) {
+                // 躺在老公左侧
+                fixX = headPos.getX() + 0.5D + bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D - bedFacing.getStepX() * offset;
+            } else {
+                // 躺在老公右侧
+                fixX = headPos.getX() + 0.5D - bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D + bedFacing.getStepX() * offset;
+            }
+            entityData.set(IS_SIDE_LYING, true);
+        } else if (!girlfriendsInBed.isEmpty()) {
+            // 已有女友在床上但老公不在，新女友躺在另一侧
+            if (sleepOnLeft) {
+                fixX = headPos.getX() + 0.5D + bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D - bedFacing.getStepX() * offset;
+            } else {
+                fixX = headPos.getX() + 0.5D - bedFacing.getStepZ() * offset;
+                fixY = headPos.getY() + 0.5D;
+                fixZ = headPos.getZ() + 0.5D + bedFacing.getStepX() * offset;
+            }
             entityData.set(IS_SIDE_LYING, true);
         } else {
             // 一人睡 → HEAD 格中心
@@ -816,6 +1009,57 @@ public class CreeperMother extends PathfinderMob {
         this.isSleeping = true;
         this.noPhysics = true;
         this.setNoGravity(true);
+    }
+
+    private List<CreeperMother> getGirlfriendsInBed(BlockPos headPos) {
+        return level().getEntitiesOfClass(CreeperMother.class, 
+                new AABB(headPos).inflate(2.0D),
+                girl -> girl.isSleeping() && girl.bedPos != null && 
+                        girl.bedPos.closerThan(headPos, 2.0D));
+    }
+
+    private boolean shouldSleepOnLeft(List<CreeperMother> girlfriendsInBed, Direction bedFacing) {
+        if (girlfriendsInBed.isEmpty()) {
+            return random.nextBoolean();
+        }
+        
+        // 检查已有女友的位置
+        for (CreeperMother girl : girlfriendsInBed) {
+            if (girl == this) continue;
+            double girlX = girl.getX();
+            double girlZ = girl.getZ();
+            double headX = girl.bedPos.getX() + 0.5D;
+            double headZ = girl.bedPos.getZ() + 0.5D;
+            
+            // 判断女友在左侧还是右侧
+            double cross = (girlX - headX) * bedFacing.getStepZ() - (girlZ - headZ) * bedFacing.getStepX();
+            if (cross > 0) {
+                // 已有女友在左侧，新女友睡右侧
+                return false;
+            }
+        }
+        // 没有女友在左侧，新女友睡左侧
+        return true;
+    }
+
+    private BlockPos findNearbyBed(BlockPos headPos) {
+        // 在周围搜索空床
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                BlockPos checkPos = headPos.offset(dx, 0, dz);
+                BlockState state = level().getBlockState(checkPos);
+                if (state.getBlock() instanceof BedBlock && 
+                        state.getValue(BedBlock.PART) == BedPart.HEAD) {
+                    // 检查这张床是否已满
+                    List<CreeperMother> girls = getGirlfriendsInBed(checkPos);
+                    if (girls.size() < 2) {
+                        return checkPos;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private void wakeUp() {
@@ -1146,5 +1390,364 @@ public class CreeperMother extends PathfinderMob {
 
     private void handleSweetJealousy() {
 
+    }
+    
+    // ==========================================
+    // 保护老公功能
+    // 当检测到老公受到伤害时，自动攻击攻击者
+    // ==========================================
+    private void handleProtectHusband() {
+        Player husband = level().getPlayerByUUID(husbandUUID);
+        if (husband == null) return;
+        
+        // 检查老公是否正在受到伤害
+        if (husband.hurtTime > 0) {
+            husbandHurtTime = 60; // 重置保护时间
+        }
+        
+        // 如果老公刚受到伤害，寻找攻击者
+        if (husbandHurtTime > 0) {
+            husbandHurtTime--;
+            
+            // 检查是否有攻击者
+            DamageSource lastDamageSource = husband.getLastDamageSource();
+            if (lastDamageSource != null) {
+                Entity attacker = lastDamageSource.getEntity();
+                if (attacker instanceof LivingEntity livingAttacker && attacker != this) {
+                    // 验证攻击者：不能是其他女友或和平生物
+                    if (isValidAttackTarget(livingAttacker)) {
+                        setAttackTarget(livingAttacker);
+                        return;
+                    }
+                }
+            }
+            
+            // 如果没有直接攻击者，搜索附近的敌对实体
+            if (currentAttackTarget == null || !currentAttackTarget.isAlive()) {
+                searchForHostileEntities(husband);
+            }
+        }
+    }
+    
+    // ==========================================
+    // 协同攻击功能
+    // 当老公攻击玩家或怪物时，女友一起攻击
+    // ==========================================
+    private void handleAssistAttack() {
+        Player husband = level().getPlayerByUUID(husbandUUID);
+        if (husband == null) return;
+        
+        // 检查老公是否正在攻击（使用 attackAnim 来检测）
+        if (husband.attackAnim > 0) {
+            // 寻找老公正在攻击的目标
+            Entity target = husband.getLastHurtMob();
+            if (target instanceof LivingEntity livingTarget && target != this) {
+                // 验证目标：不能是其他女友
+                if (isValidAttackTarget(livingTarget)) {
+                    setAttackTarget(livingTarget);
+                    return;
+                }
+            }
+            
+            // 搜索老公附近的敌对实体
+            searchForHostileEntities(husband);
+        }
+    }
+    
+    // ==========================================
+    // 搜索附近的敌对实体
+    // ==========================================
+    private void searchForHostileEntities(Player husband) {
+        double maxDistance = PROTECT_RANGE;
+        List<LivingEntity> nearbyEntities = level().getEntitiesOfClass(
+            LivingEntity.class,
+            new AABB(
+                husband.getX() - maxDistance,
+                husband.getY() - 2,
+                husband.getZ() - maxDistance,
+                husband.getX() + maxDistance,
+                husband.getY() + 3,
+                husband.getZ() + maxDistance
+            )
+        );
+        
+        // 找到最近的敌对实体
+        LivingEntity nearestHostile = null;
+        double nearestDistance = Double.MAX_VALUE;
+        
+        for (LivingEntity entity : nearbyEntities) {
+            if (entity != this && isValidAttackTarget(entity)) {
+                double distance = entity.distanceTo(husband);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestHostile = entity;
+                }
+            }
+        }
+        
+        if (nearestHostile != null) {
+            setAttackTarget(nearestHostile);
+        }
+    }
+    
+    // ==========================================
+    // 验证攻击目标是否有效
+    // ==========================================
+    private boolean isValidAttackTarget(LivingEntity entity) {
+        // 不能是自己
+        if (entity == this) return false;
+        
+        // 不能是和平生物（被动生物）
+        if (entity instanceof Animal) {
+            return false;
+        }
+        
+        // 不能是玩家（除非是攻击老公的玩家）
+        if (entity instanceof Player player) {
+            // 如果是老公，不攻击
+            if (player.getUUID().equals(husbandUUID)) {
+                return false;
+            }
+            // 检查是否是其他女友
+            if (isOtherGirlfriend(player)) {
+                return false;
+            }
+            // 允许攻击其他玩家（作为保护老公的一部分）
+            return true;
+        }
+        
+        // 敌对怪物
+        if (entity instanceof Enemy) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // ==========================================
+    // 检查玩家是否是其他女友
+    // ==========================================
+    private boolean isOtherGirlfriend(Player player) {
+        // 可以在这里添加检查逻辑，比如检查玩家是否有女友组件
+        return false;
+    }
+    
+    // ==========================================
+    // 设置攻击目标
+    // ==========================================
+    private void setAttackTarget(LivingEntity target) {
+        if (protectCooldown > 0 && currentAttackTarget != null) {
+            return; // 有冷却时间
+        }
+        
+        currentAttackTarget = target;
+        protectCooldown = 20; // 20tick冷却
+        
+        // 触发愤怒动画
+        triggerAnimation("angry");
+        adjustMood(-5); // 战斗会降低心情
+        
+        // 向老公报告
+        Player husband = level().getPlayerByUUID(husbandUUID);
+        if (husband != null) {
+            addMessageToMemory("system", "（老公有危险！你准备战斗！）");
+            DeepSeekAPI.askAI(husband, this, "（看到老公有危险，你眼神变得坚定，握紧拳头准备保护他）");
+        }
+    }
+    
+    // ==========================================
+    // 更新攻击目标状态
+    // ==========================================
+    private void updateAttackTarget() {
+        if (currentAttackTarget == null || !currentAttackTarget.isAlive()) {
+            currentAttackTarget = null;
+            return;
+        }
+        
+        Player husband = level().getPlayerByUUID(husbandUUID);
+        
+        // 检查目标是否超出保护范围
+        if (husband != null) {
+            double distanceToHusband = currentAttackTarget.distanceTo(husband);
+            if (distanceToHusband > MAX_PROTECT_DISTANCE) {
+                currentAttackTarget = null;
+                return;
+            }
+        }
+        
+        // 移动到目标附近
+        double distance = this.distanceTo(currentAttackTarget);
+        if (distance > 1.5D) {
+            // 先面向目标
+            this.getLookControl().setLookAt(currentAttackTarget, 90F, 90F);
+            
+            // 如果距离太远，向目标移动
+            if (distance > 20D) {
+                // 先跑到老公身边，再去战斗
+                if (husband != null && this.distanceTo(husband) > 5D) {
+                    this.getNavigation().moveTo(husband, 1.5D);
+                } else {
+                    this.getNavigation().moveTo(currentAttackTarget, 1.3D);
+                }
+            } else {
+                this.getNavigation().moveTo(currentAttackTarget, 1.3D);
+            }
+        } else {
+            // 近距离攻击
+            this.getNavigation().stop();
+            this.getLookControl().setLookAt(currentAttackTarget, 90F, 90F);
+            
+            // 触发攻击动画
+            triggerAnimation("middle_right");
+            
+            // 造成伤害
+            currentAttackTarget.hurt(this.damageSources().mobAttack(this), 3.0F);
+            
+            // 添加记忆
+            addMessageToMemory("system", "（你攻击了敌人）");
+            
+            // 攻击冷却
+            protectCooldown = 30;
+        }
+    }
+    
+    // ==========================================
+    // 自主移动行为
+    // 让女友不再一动不动，而是会主动活动
+    // ==========================================
+    @Override
+    protected void registerGoals() {
+        this.goalSelector.addGoal(0, new FloatGoal(this));
+        this.goalSelector.addGoal(1, new MeleeAttackGoal(this, 1.2D, true) {
+            @Override
+            public boolean canUse() {
+                return getBehaviorState() == 2 && !isSleeping && !isWatchingHusband() && super.canUse();
+            }
+        });
+        this.goalSelector.addGoal(2, new LookAtPlayerGoal(this, Player.class, 8.0F) {
+            @Override
+            public boolean canUse() { return !isSleeping && super.canUse(); }
+        });
+        this.goalSelector.addGoal(3, new WaterAvoidingRandomStrollGoal(this, 1.0D) {
+            @Override
+            public boolean canUse() {
+                // 修改：允许女友在非睡觉状态下自由走动
+                return !isSleeping && !isPerformingKiss && !isWatchingHusband() 
+                        && currentAttackTarget == null && super.canUse();
+            }
+        });
+        this.goalSelector.addGoal(4, new RandomLookAroundGoal(this) {
+            @Override
+            public boolean canUse() { return !isSleeping && !isWatchingHusband() && super.canUse(); }
+        });
+        this.targetSelector.addGoal(1, new NearestAttackableTargetGoal<>(this, Player.class, true) {
+            @Override
+            public boolean canUse() {
+                return getBehaviorState() == 2 && !isSleeping && !isWatchingHusband() && super.canUse();
+            }
+        });
+        this.goalSelector.addGoal(1, new MoveToBlockGoal(this, 1.2D, 12) {
+            @Override
+            protected boolean isValidTarget(LevelReader level, BlockPos pos) {
+                String task = entityData.get(CURRENT_TASK);
+                if (task.equals("SMELT")) return level.getBlockState(pos).is(Blocks.FURNACE);
+                if (task.equals("OPEN_CHEST")) return level.getBlockState(pos).is(Blocks.CHEST);
+                return false;
+            }
+            @Override
+            public void tick() {
+                super.tick();
+                if (this.isReachedTarget()) executeWorkLogic();
+            }
+        });
+        this.goalSelector.addGoal(1, new MoveToBlockGoal(this, 1.2D, 16) {
+            @Override
+            protected boolean isValidTarget(LevelReader level, BlockPos pos) {
+                return pos.equals(autonomousTargetPos);
+            }
+            @Override
+            public void tick() {
+                super.tick();
+                if (this.isReachedTarget()) performAutonomousTask();
+            }
+        });
+        this.goalSelector.addGoal(1, new OpenDoorGoal(this, true));
+        
+        // 添加跟随老公的行为
+        this.goalSelector.addGoal(5, new FollowOwnerGoal(this, 1.0D, 5.0F, 2.0F) {
+            @Override
+            public boolean canUse() {
+                if (isSleeping || isPerformingKiss || currentAttackTarget != null) {
+                    return false;
+                }
+                Player husband = level().getPlayerByUUID(husbandUUID);
+                return husband != null && !isWatchingHusband();
+            }
+        });
+    }
+    
+    // ==========================================
+    // 跟随老公的目标（内部类）
+    // ==========================================
+    private class FollowOwnerGoal extends Goal {
+        private final CreeperMother girlfriend;
+        private final double speedModifier;
+        private final float startDistance;
+        private final float stopDistance;
+        private Player owner;
+        private int timeToRecalcPath;
+        
+        public FollowOwnerGoal(CreeperMother girlfriend, double speedModifier, float startDistance, float stopDistance) {
+            this.girlfriend = girlfriend;
+            this.speedModifier = speedModifier;
+            this.startDistance = startDistance;
+            this.stopDistance = stopDistance;
+        }
+        
+        @Override
+        public boolean canUse() {
+            if (girlfriend.isSleeping || girlfriend.isPerformingKiss || girlfriend.currentAttackTarget != null) {
+                return false;
+            }
+            Player husband = girlfriend.level().getPlayerByUUID(girlfriend.husbandUUID);
+            if (husband == null) {
+                return false;
+            }
+            if (husband.isSpectator()) {
+                return false;
+            }
+            // 只有当距离超过startDistance时才跟随
+            return girlfriend.distanceTo(husband) > startDistance;
+        }
+        
+        @Override
+        public boolean canContinueToUse() {
+            return canUse() && girlfriend.distanceTo(owner) > stopDistance;
+        }
+        
+        @Override
+        public void start() {
+            owner = girlfriend.level().getPlayerByUUID(girlfriend.husbandUUID);
+            timeToRecalcPath = 0;
+        }
+        
+        @Override
+        public void tick() {
+            if (owner == null) {
+                return;
+            }
+            
+            girlfriend.getLookControl().setLookAt(owner, 90.0F, 90.0F);
+            
+            if (--timeToRecalcPath <= 0) {
+                timeToRecalcPath = 10;
+                girlfriend.getNavigation().moveTo(owner, speedModifier);
+            }
+        }
+        
+        @Override
+        public void stop() {
+            girlfriend.getNavigation().stop();
+        }
     }
 }
